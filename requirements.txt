@@ -1,0 +1,24 @@
+# Core dependencies
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+numpy>=1.21.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Machine learning utilities
+scikit-learn>=1.0.0
+pandas>=1.5.0
+
+# Progress bars and utilities
+tqdm>=4.65.0
+
+# Optional: Experiment tracking
+tensorboard>=2.13.0
+wandb>=0.15.0  # Optional, for experiment tracking
+
+# Optional: Audio processing extras
+audioread>=3.0.0
+numba>=0.56.4  # Required by librosa for faster processing
