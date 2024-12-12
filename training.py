@@ -75,22 +75,29 @@ class MusicEmotionDataset(Dataset):
         return len(self.audio_paths)
     
     def get_audio_segments(self, audio_path):
+        """Process audio into 5-second segments"""
         waveform = load_audio(audio_path)
+        total_length = waveform.shape[1]
         
         if self.inference_mode:
+            # For inference, take evenly spaced segments
+            if total_length <= self.segment_length:
+                return waveform.repeat(1, max(1, self.segment_length // total_length))
+            
             segments = []
-            total_length = waveform.shape[1]
-            segment_spacing = (total_length - self.segment_length) // (self.num_inference_segments - 1)
-            
+            step = (total_length - self.segment_length) // (self.num_inference_segments - 1)
             for i in range(self.num_inference_segments):
-                start = min(i * segment_spacing, total_length - self.segment_length)
-                segment = waveform[:, start:start + self.segment_length]
-                segments.append(segment)
-            
-            return torch.stack(segments).squeeze(1)
+                start = min(i * step, total_length - self.segment_length)
+                segments.append(waveform[:, start:start + self.segment_length])
+            return torch.cat(segments, dim=0)
         else:
-            start = torch.randint(0, waveform.shape[1] - self.segment_length, (1,))
-            return waveform[:, start:start + self.segment_length].squeeze()
+            # For training, take random segment
+            if total_length <= self.segment_length:
+                # Pad if too short
+                return waveform.repeat(1, max(1, self.segment_length // total_length))
+            
+            start = torch.randint(0, total_length - self.segment_length, (1,))
+            return waveform[:, start:start + self.segment_length]
     
     def __getitem__(self, idx):
         if self.inference_mode:
@@ -299,3 +306,7 @@ def predict_emotion(model, audio_path, feature_extractor, device='cuda'):
         prediction = outputs.logits.mean(0)
         
     return prediction
+
+def normalize_ratings(ratings, min_val=1, max_val=9):
+    """Normalize Likert scale ratings to [0,1]"""
+    return (ratings - min_val) / (max_val - min_val)
