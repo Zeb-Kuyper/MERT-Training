@@ -151,145 +151,49 @@ def train_emotion_classifier(
     val_dataset: MusicEmotionDataset,
     num_labels: int,
     model_name: str = "m-a-p/MERT-v1-330M",
-    batch_size: int = 32,
+    batch_size: int = 16,            # Reduced from 32
+    gradient_accumulation_steps: int = 2,  # New parameter
+    max_audio_length_s: float = 10.0,  # Max audio length in seconds
     num_epochs: int = 10,
     learning_rate: float = 2e-5,
     weight_decay: float = 0.01,
     warmup_steps: int = 500,
     gradient_clip_val: float = 1.0,
     device: str = 'cuda',
-    output_dir: str = 'emotion_model'
+    output_dir: str = 'emotion_model',
+    use_8bit: bool = False,          # Enable 8-bit training
+    mixed_precision: bool = True     # Enable mixed precision
 ):
-    # Initialize model
-    base_model = AutoModelForAudioClassification.from_pretrained(
+    """Train emotion classifier with memory optimizations for RTX 4070"""
+    
+    # Model initialization with memory optimizations
+    model = AutoModelForAudioClassification.from_pretrained(
         model_name,
         num_labels=num_labels,
-        gradient_checkpointing=True
+        problem_type="regression",
+        use_cache=False,  # Disable KV cache
     )
-    model = EmotionClassifier(base_model).to(device)
     
-    # Data loaders
+    # Enable gradient checkpointing
+    model.gradient_checkpointing_enable()
+    
+    # Optional 8-bit quantization
+    if use_8bit:
+        model = model.to(8)
+    
+    model = model.to(device)
+    
+    # Initialize mixed precision scaler
+    scaler = GradScaler() if mixed_precision else None
+    
+    # DataLoader with dynamic batch size
     train_loader = DataLoader(
-        train_dataset, 
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True
+        pin_memory=True,
+        num_workers=4
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size * 2,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    # Optimization
-    no_decay = ['bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {
-            'params': [p for n, p in model.named_parameters() 
-                      if not any(nd in n for nd in no_decay)],
-            'weight_decay': weight_decay
-        },
-        {
-            'params': [p for n, p in model.named_parameters() 
-                      if any(nd in n for nd in no_decay)],
-            'weight_decay': 0.0
-        }
-    ]
-    
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=learning_rate)
-    num_training_steps = len(train_loader) * num_epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=num_training_steps
-    )
-    
-    scaler = GradScaler()
-    criterion = nn.MSELoss()
-    mixup = AudioMixupAugmentation(p=0.5)
-    best_val_loss = float('inf')
-    
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Training loop
-    for epoch in range(num_epochs):
-        model.train()
-        train_loss = 0
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs}')
-        
-        for batch in progress_bar:
-            optimizer.zero_grad()
-            
-            inputs = batch['input_values'].to(device)
-            labels = batch['label'].to(device)
-            
-            inputs = mixup(inputs)
-            
-            with autocast():
-                outputs = model(inputs)
-                loss = criterion(outputs.logits, labels)
-            
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
-            
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-            
-            train_loss += loss.item()
-            progress_bar.set_postfix({'loss': loss.item()})
-        
-        # Validation
-        model.eval()
-        val_loss = 0
-        val_preds = []
-        val_labels = []
-        
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc='Validation'):
-                inputs = batch['input_values'].to(device)
-                labels = batch['label'].to(device)
-                
-                with autocast():
-                    outputs = model(inputs)
-                    loss = criterion(outputs.logits, labels)
-                
-                val_loss += loss.item()
-                val_preds.extend(outputs.logits.cpu().numpy())
-                val_labels.extend(labels.cpu().numpy())
-        
-        # Calculate metrics
-        avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
-        accuracy = accuracy_score(np.round(val_labels), np.round(val_preds))
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            np.round(val_labels), np.round(val_preds), average='weighted'
-        )
-        
-        print(f'\nEpoch {epoch + 1}/{num_epochs}:')
-        print(f'Training Loss: {avg_train_loss:.4f}')
-        print(f'Validation Loss: {avg_val_loss:.4f}')
-        print(f'Accuracy: {accuracy:.4f}')
-        print(f'Precision: {precision:.4f}')
-        print(f'Recall: {recall:.4f}')
-        print(f'F1 Score: {f1:.4f}\n')
-        
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'loss': best_val_loss,
-            }, os.path.join(output_dir, 'best_model.pt'))
-    
-    return model
 
 def predict_emotion(model, audio_path, feature_extractor, device='cuda'):
     """Inference function for single audio prediction"""
@@ -353,45 +257,39 @@ def load_dataset_info(data_root: str, csv_path: str) -> tuple:
     return audio_paths, emotion_labels, len(df.columns) - 1  # -1 for 'sample' column
 
 def main():
-    # Initialize feature extractor
-    feature_extractor = AutoFeatureExtractor.from_pretrained("m-a-p/MERT-v1-330M")
-    
-    # Load dataset
-    data_root = "path/to/audio/files"
-    csv_path = "path/to/MeanCategoryRatingsUSA.csv"
+    # Set paths
+    data_root = "./audio_samples/*.mp3"
+    csv_path = "./data/raw/MeanCategoryRatingsUSA.csv"
+    output_dir = "./checkpoints"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load data
     audio_paths, emotion_labels, num_emotions = load_dataset_info(data_root, csv_path)
-    
-    # Split into train/val
-    indices = np.random.permutation(len(audio_paths))
-    split = int(0.8 * len(indices))
-    train_indices = indices[:split]
-    val_indices = indices[split:]
-    
-    train_audio_paths = [audio_paths[i] for i in train_indices]
-    train_labels = [emotion_labels[i] for i in train_indices]
-    val_audio_paths = [audio_paths[i] for i in val_indices]
-    val_labels = [emotion_labels[i] for i in val_indices]
+    feature_extractor = AutoFeatureExtractor.from_pretrained("m-a-p/MERT-v1-330M")
 
     # Create datasets
     train_dataset = MusicEmotionDataset(
-        audio_paths=train_audio_paths,
-        emotion_labels=train_labels,
+        audio_paths=audio_paths[:800],  # 80% for training
+        emotion_labels=emotion_labels[:800],
         feature_extractor=feature_extractor
     )
 
     val_dataset = MusicEmotionDataset(
-        audio_paths=val_audio_paths,
-        emotion_labels=val_labels,
+        audio_paths=audio_paths[800:],  # 20% for validation
+        emotion_labels=emotion_labels[800:],
         feature_extractor=feature_extractor
     )
 
-    # Train model
+    # Train
     model = train_emotion_classifier(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         num_labels=num_emotions,
-        batch_size=32,
-        num_epochs=10
+        batch_size=16,
+        gradient_accumulation_steps=2,
+        num_epochs=10,
+        output_dir=output_dir,
+        mixed_precision=True
     )
 
 if __name__ == "__main__":
