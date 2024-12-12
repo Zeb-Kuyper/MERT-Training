@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torchaudio
 import librosa
+import shutil
+import pandas as pd
 from pathlib import Path
 from typing import List, Optional, Union, Dict
 from torch.utils.data import Dataset, DataLoader
@@ -57,7 +59,7 @@ class MusicEmotionDataset(Dataset):
     def __init__(
         self, 
         audio_paths: List[str], 
-        emotion_labels: List[int], 
+        emotion_labels: List[np.ndarray], 
         feature_extractor,
         segment_length: int = 120000,  # 5 seconds at 24kHz
         inference_mode: bool = False,
@@ -122,7 +124,7 @@ class MusicEmotionDataset(Dataset):
             
             return {
                 'input_values': inputs.input_values.squeeze(),
-                'label': self.emotion_labels[idx]
+                'label': torch.tensor(self.emotion_labels[idx], dtype=torch.float32)
             }
 
 class EmotionClassifier(nn.Module):
@@ -205,7 +207,7 @@ def train_emotion_classifier(
     )
     
     scaler = GradScaler()
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.MSELoss()
     mixup = AudioMixupAugmentation(p=0.5)
     best_val_loss = float('inf')
     
@@ -257,15 +259,15 @@ def train_emotion_classifier(
                     loss = criterion(outputs.logits, labels)
                 
                 val_loss += loss.item()
-                val_preds.extend(outputs.logits.argmax(dim=-1).cpu().numpy())
+                val_preds.extend(outputs.logits.cpu().numpy())
                 val_labels.extend(labels.cpu().numpy())
         
         # Calculate metrics
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
-        accuracy = accuracy_score(val_labels, val_preds)
+        accuracy = accuracy_score(np.round(val_labels), np.round(val_preds))
         precision, recall, f1, _ = precision_recall_fscore_support(
-            val_labels, val_preds, average='weighted'
+            np.round(val_labels), np.round(val_preds), average='weighted'
         )
         
         print(f'\nEpoch {epoch + 1}/{num_epochs}:')
@@ -293,7 +295,7 @@ def predict_emotion(model, audio_path, feature_extractor, device='cuda'):
     """Inference function for single audio prediction"""
     dataset = MusicEmotionDataset(
         [audio_path],
-        [0],  # Dummy label
+        [np.zeros(1)],  # Dummy label
         feature_extractor,
         inference_mode=True
     )
@@ -310,3 +312,87 @@ def predict_emotion(model, audio_path, feature_extractor, device='cuda'):
 def normalize_ratings(ratings, min_val=1, max_val=9):
     """Normalize Likert scale ratings to [0,1]"""
     return (ratings - min_val) / (max_val - min_val)
+
+def organize_audio_files():
+    # Source directories
+    macosx_dir = Path("_MACOSX/Verified_Normed")
+    verified_dir = Path("Verified_Normed")
+    
+    # Target directory
+    target_dir = Path("audio_samples")
+    target_dir.mkdir(exist_ok=True)
+    
+    # Move files from Verified_Normed
+    for audio_file in verified_dir.glob("*.mp3"):
+        shutil.move(str(audio_file), str(target_dir / audio_file.name))
+    
+    # Cleanup
+    if macosx_dir.exists():
+        shutil.rmtree(macosx_dir)
+    if verified_dir.exists():
+        shutil.rmtree(verified_dir)
+
+def load_dataset_info(data_root: str, csv_path: str) -> tuple:
+    """Load audio paths and emotion ratings from CSV"""
+    # Read CSV
+    df = pd.read_csv(csv_path)
+    
+    # Get audio paths and labels
+    audio_paths = []
+    emotion_labels = []
+    
+    for index, row in df.iterrows():
+        audio_file = row['sample']
+        file_path = os.path.join(data_root, audio_file)
+        if os.path.exists(file_path):
+            audio_paths.append(file_path)
+            # Convert emotion ratings to tensor (excluding 'sample' column)
+            labels = row[1:].values.astype(np.float32)
+            emotion_labels.append(labels)
+    
+    return audio_paths, emotion_labels, len(df.columns) - 1  # -1 for 'sample' column
+
+def main():
+    # Initialize feature extractor
+    feature_extractor = AutoFeatureExtractor.from_pretrained("m-a-p/MERT-v1-330M")
+    
+    # Load dataset
+    data_root = "path/to/audio/files"
+    csv_path = "path/to/MeanCategoryRatingsUSA.csv"
+    audio_paths, emotion_labels, num_emotions = load_dataset_info(data_root, csv_path)
+    
+    # Split into train/val
+    indices = np.random.permutation(len(audio_paths))
+    split = int(0.8 * len(indices))
+    train_indices = indices[:split]
+    val_indices = indices[split:]
+    
+    train_audio_paths = [audio_paths[i] for i in train_indices]
+    train_labels = [emotion_labels[i] for i in train_indices]
+    val_audio_paths = [audio_paths[i] for i in val_indices]
+    val_labels = [emotion_labels[i] for i in val_indices]
+
+    # Create datasets
+    train_dataset = MusicEmotionDataset(
+        audio_paths=train_audio_paths,
+        emotion_labels=train_labels,
+        feature_extractor=feature_extractor
+    )
+
+    val_dataset = MusicEmotionDataset(
+        audio_paths=val_audio_paths,
+        emotion_labels=val_labels,
+        feature_extractor=feature_extractor
+    )
+
+    # Train model
+    model = train_emotion_classifier(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        num_labels=num_emotions,
+        batch_size=32,
+        num_epochs=10
+    )
+
+if __name__ == "__main__":
+    main()
