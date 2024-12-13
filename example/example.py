@@ -34,8 +34,7 @@ inputs = processor(input_audio, sampling_rate=resample_rate, return_tensors="pt"
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
-# take a look at the output shape, there are 25 layers of representation
-# each layer performs differently in different downstream tasks, you should choose empirically
+
 all_layer_hidden_states = torch.stack(outputs.hidden_states).squeeze()
 print(all_layer_hidden_states.shape) # [25 layer, Time steps, 1024 feature_dim]
 

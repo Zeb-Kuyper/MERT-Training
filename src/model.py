@@ -1,19 +1,29 @@
-from transformers import AutoModel
 import torch.nn as nn
+from transformers import AutoModel
+import torch
 
 class AudioClassifier(nn.Module):
-    def __init__(self, pretrained_model="m-a-p/MERT-v1-330M", num_classes=2):
+    def __init__(self, base_model, num_classes, freeze_base=True):
         super().__init__()
-        self.base_model = AutoModel.from_pretrained(pretrained_model, trust_remote_code=True)
-        self.classifier = nn.Sequential(
-            nn.Linear(1024, 256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, num_classes)
-        )
+        self.base_model = base_model
         
+        # Freeze base model parameters
+        if freeze_base:
+            for param in self.base_model.parameters():
+                param.requires_grad = False
+                
+        # Add classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(base_model.config.hidden_size, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, num_classes)
+        )
+
     def forward(self, x):
-        outputs = self.base_model(**x, output_hidden_states=True)
-        hidden_states = outputs.hidden_states[-1]
-        pooled = hidden_states.mean(dim=1)
-        return self.classifier(pooled)
+        # Get MERT embeddings
+        outputs = self.base_model(x)
+        # Use mean pooling over time dimension
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+        # Classification
+        return self.classifier(embeddings)
