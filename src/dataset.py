@@ -7,7 +7,6 @@ from datasets import Audio, load_dataset, Dataset
 import pandas as pd
 import os
 from pathlib import Path
-from sklearn.model_selection import train_test_split
 
 class AudioDataset(Dataset):
     def __init__(self, data, config):
@@ -53,40 +52,6 @@ def create_hf_dataset(data_path, audio_dir):
     dataset = Dataset.from_dict(dataset_dict).cast_column("audio", Audio())
     
     return dataset
-
-# Split the dataset into train and validation sets
-train_df, valid_df = train_test_split(df, test_size=0.2, random_state=42)
-
-# Function to create .tsv files
-def create_tsv(df, split, audio_dir):
-    tsv_path = Path(f"{split}.tsv")
-    with tsv_path.open("w") as f:
-        for _, row in df.iterrows():
-            audio_path = Path(audio_dir) / row['sample']
-            f.write(f"{audio_path}\t{row['label']}\n")
-
-# Create train.tsv and valid.tsv
-create_tsv(train_df, "train", DataConfig.audio_dir)
-create_tsv(valid_df, "valid", DataConfig.audio_dir)
-
-# Function to create .km files (dummy implementation)
-def create_km(df, split):
-    km_path = Path(f"{split}.km")
-    with km_path.open("w") as f:
-        for _, row in df.iterrows():
-            # Dummy frame-aligned pseudo labels
-            waveform, sr = torchaudio.load(Path(DataConfig.audio_dir) / row['sample'])
-            num_frames = waveform.shape[1] // (sr // 100)  # Assuming 100Hz frame rate
-            labels = " ".join(["0"] * num_frames)  # Dummy labels
-            f.write(f"{labels}\n")
-
-# Create train.km and valid.km
-create_km(train_df, "train")
-create_km(valid_df, "valid")
-
-# Create dict.km.txt (dummy dictionary)
-with open("dict.km.txt", "w") as f:
-    f.write("0 1\n")
 
 if __name__ == "__main__":
     dataset = create_hf_dataset(
